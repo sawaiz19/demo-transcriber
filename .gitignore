@@ -1,0 +1,8 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+speakers.sqlite3
+pretrained_models/
+.streamlit/secrets.toml
