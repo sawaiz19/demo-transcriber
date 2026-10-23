@@ -6,3 +6,11 @@ __pycache__/
 speakers.sqlite3
 pretrained_models/
 .streamlit/secrets.toml
+.venv/
+__pycache__/
+*.py[cod]
+models/
+pretrained_models/
+*.sqlite3
+.env
+.streamlit/secrets.toml

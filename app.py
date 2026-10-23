@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from math import gcd
@@ -15,6 +16,7 @@ import torch.nn.functional as F
 from scipy.signal import resample_poly
 from faster_whisper import WhisperModel
 from speechbrain.inference.speaker import SpeakerRecognition
+from speechbrain.utils.fetching import LocalStrategy
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(APP_DIR, "speakers.sqlite3")
@@ -66,10 +68,29 @@ def delete_speaker(speaker_id):
         conn.commit()
 
 
-@st.cache_resource(show_spinner="Loading multilingual speech-to-text model (first run downloads model files)...")
-def load_whisper_model(model_size):
-    # CPU-friendly defaults; int8 reduces memory use. Model downloads on first use.
-    return WhisperModel(model_size, device="cpu", compute_type="int8")
+WHISPER_MODEL_DIR = os.path.join(APP_DIR, "models", "whisper")
+os.makedirs(WHISPER_MODEL_DIR, exist_ok=True)
+
+WHISPER_MODELS = {
+    "Faster-Whisper Base (fast, general)": "base",
+    "Faster-Whisper Small (better quality, general)": "small",
+    "Faster-Whisper Medium (high accuracy, slower)": "medium",
+    "Faster-Whisper Large-v3 (highest accuracy, very slow/heavy)": "large-v3",
+    "Fine-tuned Urdu Small (INT8, Urdu-focused)": "Inferencelab/whisper-small-urdu-int8-ct2",
+}
+
+
+@st.cache_resource(show_spinner="Loading speech-to-text model (first run downloads it)...")
+def load_whisper_model(model_id):
+    # CPU INT8 suits this 8 GB RAM, Intel integrated-graphics computer.
+    # Models are cached under the app folder and reused on later runs.
+    return WhisperModel(
+        model_id,
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=max(2, min(4, (os.cpu_count() or 4) - 1)),
+        download_root=WHISPER_MODEL_DIR,
+    )
 
 
 @st.cache_resource(show_spinner="Loading speaker-recognition model (first run can take a few minutes)...")
@@ -78,6 +99,7 @@ def load_speaker_model():
         source=SPEAKER_MODEL_SOURCE,
         savedir=os.path.join(APP_DIR, "pretrained_models", "spkrec-ecapa-voxceleb"),
         run_opts={"device": "cpu"},
+        local_strategy=LocalStrategy.COPY,  # Copy files instead of requiring Windows symlink privileges.
     )
 
 
@@ -134,10 +156,9 @@ def cosine_similarity(a, b):
     return float(F.cosine_similarity(at.unsqueeze(0), bt.unsqueeze(0)).item())
 
 
-def transcribe_audio(audio_file, language, model_size):
-    raw = audio_file.getvalue() if hasattr(audio_file, "getvalue") else audio_file
-    # Preserve the uploaded extension so FFmpeg/PyAV can identify the format correctly.
-    filename = getattr(audio_file, "name", "audio.wav")
+@st.cache_data(show_spinner=False, max_entries=3)
+def _transcribe_cached(raw: bytes, filename: str, language: str, model_id: str, speed_mode: str):
+    """Cache results so rerunning the same file/settings does not transcribe it again."""
     suffix = os.path.splitext(filename)[1].lower() or ".wav"
     if suffix not in {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm", ".mp4", ".mpeg", ".mpga"}:
         suffix = ".wav"
@@ -145,20 +166,61 @@ def transcribe_audio(audio_file, language, model_size):
         tmp.write(raw)
         temp_path = tmp.name
     try:
-        model = load_whisper_model(model_size)
-        language_code = None if language == "Auto-detect" else {"Urdu": "ur", "English": "en"}[language]
+        model = load_whisper_model(model_id)
+        # Prefer Urdu for mixed Urdu-English recordings; this is a model hint, not a guarantee.
+        language_code = {
+            "Urdu + English (automatic, prefer Urdu script)": "ur",
+            "Urdu only": "ur",
+            "English only": "en",
+            "Auto-detect (any language)": None,
+        }[language]
+        if model_id == "Inferencelab/whisper-small-urdu-int8-ct2" and language == "Urdu + English (automatic, prefer Urdu script)":
+            language_code = "ur"
+        fast_mode = speed_mode.startswith("Fast")
+        # Guide mixed-language output: Urdu in Urdu script, English in Latin script.
+        initial_prompt = None
+        if language == "Urdu + English (automatic, prefer Urdu script)":
+            initial_prompt = (
+                "The speaker may switch naturally between Urdu and English. "
+                "Write Urdu words in Urdu script, not Hindi or Devanagari script. "
+                "Write English words in Latin script. Do not translate the speech."
+            )
         segments, info = model.transcribe(
             temp_path,
             language=language_code,
-            beam_size=5,
+            initial_prompt=initial_prompt,
+            beam_size=1 if fast_mode else 3,
+            best_of=1 if fast_mode else 3,
+            temperature=0.0,
+            # Prevent earlier mistaken text from feeding a repetition loop into later segments.
+            condition_on_previous_text=False,
+            # Drop suspiciously repetitive/implausible segments where supported by Whisper decoding.
+            compression_ratio_threshold=2.2,
+            repetition_penalty=1.08,
+            no_repeat_ngram_size=3,
             vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
         )
         segments = list(segments)
-        text = " ".join(s.text.strip() for s in segments).strip()
-        return text, info.language, float(info.language_probability), [
-            {"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()}
-            for s in segments
-        ]
+
+        # Safety net: remove obvious repeated-token loops in a segment, but keep normal repetition
+        # when it is genuinely spoken. This is intentionally conservative.
+        cleaned_segments = []
+        for seg in segments:
+            segment_text = seg.text.strip()
+            words = segment_text.split()
+            if len(words) >= 12:
+                tail = words[-12:]
+                # If the last 12 whitespace-delimited tokens are identical, truncate that loop.
+                if len(set(tail)) == 1:
+                    segment_text = " ".join(words[:-12]).strip()
+            cleaned_segments.append({
+                "start": round(seg.start, 2),
+                "end": round(seg.end, 2),
+                "text": segment_text,
+            })
+        text = " ".join(s["text"] for s in cleaned_segments if s["text"]).strip()
+        return text, info.language, float(info.language_probability), cleaned_segments
     finally:
         try:
             os.remove(temp_path)
@@ -166,18 +228,66 @@ def transcribe_audio(audio_file, language, model_size):
             pass
 
 
+def transcribe_audio(audio_file, language, model_id, speed_mode):
+    raw = audio_file.getvalue() if hasattr(audio_file, "getvalue") else audio_file
+    filename = getattr(audio_file, "name", "audio.wav")
+    return _transcribe_cached(raw, filename, language, model_id, speed_mode)
+
+
+
+def _format_timestamp(seconds, srt=False):
+    """Format seconds as HH:MM:SS,mmm for SRT or HH:MM:SS.mmm for VTT."""
+    milliseconds = max(0, int(round(float(seconds) * 1000)))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    separator = "," if srt else "."
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}"
+
+
+def segments_to_srt(segments):
+    blocks = []
+    for index, segment in enumerate(segments, start=1):
+        text = str(segment.get("text", "")).strip()
+        if text:
+            blocks.append(
+                f"{index}\n{_format_timestamp(segment['start'], srt=True)} --> "
+                f"{_format_timestamp(segment['end'], srt=True)}\n{text}"
+            )
+    return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def segments_to_vtt(segments):
+    blocks = ["WEBVTT", ""]
+    for segment in segments:
+        text = str(segment.get("text", "")).strip()
+        if text:
+            blocks.append(
+                f"{_format_timestamp(segment['start'])} --> "
+                f"{_format_timestamp(segment['end'])}\n{text}\n"
+            )
+    return "\n".join(blocks).rstrip() + "\n"
+
+
 st.title("🎙️ Urdu + English Speech-to-Text & Speaker Recognition")
 st.caption("Local prototype: transcribe spoken Urdu/English and compare a recording with consented speaker profiles.")
 
 with st.sidebar:
     st.header("Model settings")
-    model_size = st.selectbox(
+    model_label = st.selectbox(
         "Speech-to-text model",
-        ["tiny", "base", "small", "medium"],
-        index=2,
-        help="Larger models are usually more accurate but need more RAM and run more slowly. All listed models are multilingual.",
+        list(WHISPER_MODELS.keys()),
+        index=0,
+        help="Models download from Hugging Face the first time you select them and are saved in the app's models/whisper folder. Large-v3 is the high-accuracy option but is much slower and memory-intensive on an 8 GB CPU PC. No model guarantees perfect transcription.",
     )
-    st.caption("The first run downloads model files. Keep this app local until you add authentication and privacy protections.")
+    model_id = WHISPER_MODELS[model_label]
+    speed_mode = st.selectbox(
+        "Transcription mode",
+        ["Fast (recommended)", "Balanced (more careful decoding)"],
+        index=0,
+        help="Fast uses greedy decoding. Balanced uses a wider beam and can improve accuracy at the cost of time.",
+    )
+    st.caption("Speed: Base + Fast. Balanced quality: Small or Medium. Maximum local Whisper accuracy: Large-v3 (slow and RAM-intensive on this PC). The Urdu fine-tuned option is experimental for mixed Urdu-English speech.")
 
 tab_transcribe, tab_enroll, tab_identify, tab_profiles = st.tabs(
     ["Speech to text", "Enroll speaker", "Recognize speaker", "Saved profiles"]
@@ -185,7 +295,18 @@ tab_transcribe, tab_enroll, tab_identify, tab_profiles = st.tabs(
 
 with tab_transcribe:
     st.subheader("Transcribe spoken Urdu or English")
-    language = st.radio("Spoken language", ["Auto-detect", "Urdu", "English"], horizontal=True)
+    st.caption("Recommended mode handles Urdu-English code-switching and prefers Urdu script for Urdu speech.")
+    language = st.radio(
+        "Spoken language",
+        [
+            "Urdu + English (automatic, prefer Urdu script)",
+            "Urdu only",
+            "English only",
+            "Auto-detect (any language)",
+        ],
+        horizontal=True,
+        help="Recommended: transcribes Urdu and English as spoken, using Urdu as the language hint and prompting Urdu words to use Urdu script and English words to use Latin script. This reduces Hindi/Devanagari mistakes but cannot guarantee zero errors."
+    )
     audio_source = st.radio("Audio source", ["Record with microphone", "Upload an audio file"], horizontal=True, key="transcribe_source")
     if audio_source == "Record with microphone":
         audio = st.audio_input("Record speech (5–30 seconds works well)", sample_rate=16000, key="transcribe_audio")
@@ -201,20 +322,31 @@ with tab_transcribe:
             st.error("Record speech or upload an audio file first.")
         else:
             try:
-                with st.spinner("Transcribing audio..."):
-                    text, detected_language, language_probability, segments = transcribe_audio(audio, language, model_size)
+                started_at = time.perf_counter()
+                with st.spinner("Transcribing audio... The first run for a model can take longer; repeat runs with the same file and settings use cached results."):
+                    text, detected_language, language_probability, segments = transcribe_audio(audio, language, model_id, speed_mode)
+                elapsed = time.perf_counter() - started_at
                 if text:
+                    audio_seconds = sum(max(0.0, seg["end"] - seg["start"]) for seg in segments)
                     st.success(f"Transcription complete · Detected language: {detected_language} ({language_probability:.0%} model confidence)")
-                    st.text_area("Recognized text", value=text, height=180)
-                    st.download_button("Download transcript (.txt)", data=text, file_name="transcript.txt", mime="text/plain")
+                    metric_cols = st.columns(3)
+                    metric_cols[0].metric("Processing time", f"{elapsed:.1f}s")
+                    metric_cols[1].metric("Transcript segments", str(len(segments)))
+                    metric_cols[2].metric("Speech duration", f"{audio_seconds / 60:.1f} min")
+                    st.caption("Processing time includes cache lookup; repeated runs with identical settings may be much faster because results are cached.")
+                    edited_text = st.text_area("Review and edit transcript", value=text, height=220, key="edited_transcript")
+                    st.download_button("Download edited transcript (.txt)", data=edited_text, file_name="transcript.txt", mime="text/plain")
+                    col_srt, col_vtt = st.columns(2)
+                    col_srt.download_button("Download subtitles (.srt)", data=segments_to_srt(segments), file_name="transcript.srt", mime="application/x-subrip")
+                    col_vtt.download_button("Download subtitles (.vtt)", data=segments_to_vtt(segments), file_name="transcript.vtt", mime="text/vtt")
                     with st.expander("Show segment timestamps"):
                         for seg in segments:
-                            st.write(f"{seg['start']:.2f}s – {seg['end']:.2f}s: {seg['text']}")
+                            st.write(f"{_format_timestamp(seg['start'])} – {_format_timestamp(seg['end'])}: {seg['text']}")
                 else:
                     st.warning("No speech was recognized. Try a longer, clearer recording.")
             except Exception as e:
                 st.error(f"Transcription failed: {e}")
-                st.caption("Check that the audio is a valid WAV recording and that the model finished downloading.")
+                st.caption("Check that the file contains an audio track, that the selected model finished downloading, and that enough RAM and disk space are available. Try Faster-Whisper Base + Fast for a quicker test, and check that the model download completed.")
 
 with tab_enroll:
     st.subheader("Create a speaker profile")
@@ -323,6 +455,5 @@ with tab_profiles:
 st.divider()
 st.caption(
     "Prototype limitations: Whisper is multilingual, but Urdu accuracy varies with accent, recording quality, and code-switching. "
-    "The speaker model is trained mainly on VoxCeleb data, so Urdu speaker matching must be validated. "
     "This app compares one speaker per recording; it does not perform multi-speaker diarization or liveness detection."
 )
