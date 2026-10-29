@@ -1,0 +1,9 @@
+streamlit>=1.40
+qwen-asr
+torch
+numpy
+soundfile
+av
+scipy
+requests
+speechbrain

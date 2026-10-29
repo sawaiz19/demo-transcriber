@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Downloaded model files / caches
+models/
+pretrained_models/
+.cache/
+huggingface/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Local speaker database and generated output
+speakers.sqlite3
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.webm
