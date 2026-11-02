@@ -1,11 +1,32 @@
+# UI
 streamlit>=1.40
-qwen-asr
-transformers>=4.40.0
-accelerate>=0.28.0
-torch
+pandas
+
+# Core numerics / audio
 numpy
+scipy
 soundfile
 av
-scipy
+
+# ML runtime
+torch>=2.0
+transformers>=4.40.0
+accelerate>=0.28.0
+huggingface_hub
+
+# ASR engines
+qwen-asr
+
+# Speaker diarization & enrollment (replaces speechbrain)
+pyannote.audio>=3.1
+
+# Hindi (Devanagari) -> Roman transliteration (LIPI, used by romanize.py)
+# NOTE: verify the package name/source for `lipi` in your venv; it is imported as `from lipi import Transliterator`
+lipi
+
+# AI summary (Ollama / Groq / OpenAI HTTP calls)
 requests
-speechbrain
+
+# Optional extras (install only if you use them):
+#   demucs            # "Extract voice first (Demucs)" option
+#   cactus-needle     # Shruti (tiny offline CPU) engine

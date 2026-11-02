@@ -21,7 +21,7 @@ AUDIO_TYPES = ["wav", "mp3", "m4a", "flac", "ogg", "webm", "mp4", "mpeg", "mpga"
 
 st.set_page_config(
     page_title="Urdu & English AI Transcriber",
-    page_icon="🎙️",
+    page_icon="TMC",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -136,7 +136,7 @@ def plan_segments(audio, turns):
 # ------------------------------- sidebar ------------------------------------
 
 with st.sidebar:
-    st.markdown("### 🎙️ ASR Configuration")
+    st.markdown("ASR Configuration")
     model_label = st.selectbox(
         "Speech-recognition model",
         list(asr.ENGINES),
@@ -153,7 +153,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.markdown("### 👤 Speaker Diarization (pyannote)")
+    st.markdown("Speaker Diarization (pyannote)")
     auto_speaker = st.checkbox(
         "Automatic speaker identification",
         value=True,
@@ -188,15 +188,15 @@ with st.sidebar:
     saved_speakers = speakers.list_speakers()
     usable_profiles = speakers.load_embeddings()
     if usable_profiles:
-        st.success(f"🟢 {len(usable_profiles)} enrolled profile(s) ready")
+        st.success(f" {len(usable_profiles)} enrolled profile(s) ready")
     else:
-        st.info("ℹ️ No enrolled profiles. Speakers will be labeled Anonymous 1, Anonymous 2...")
+        st.info("No enrolled profiles. Speakers will be labeled Anonymous 1, Anonymous 2...")
     legacy = speakers.legacy_profile_names()
     if legacy:
         st.warning(f"{len(legacy)} old SpeechBrain profile(s) must be re-enrolled: {', '.join(legacy[:4])}")
 
     st.divider()
-    st.markdown("### 🧠 AI Summary & Key Points")
+    st.markdown("AI Summary & Key Points")
     enable_summary = st.checkbox(
         "Auto-generate AI summary & key points",
         value=True,
@@ -212,11 +212,11 @@ with st.sidebar:
 
     if llm_provider == "Ollama (Local)":
         if ollama_ready:
-            st.success("🟢 Ollama connected")
+            st.success("Ollama connected")
             ollama_models = summary.list_ollama_models()
             llm_model = st.selectbox("Ollama Model", ollama_models if ollama_models else ["qwen2.5:7b", "llama3.2:3b", "qwen3:1.7b"], index=0)
         else:
-            st.warning("⚠️ Ollama is not running on localhost:11434.")
+            st.warning("Ollama is not running on localhost:11434.")
             llm_model = st.text_input("Ollama Model Name", value="qwen2.5:7b")
         llm_api_key = ""
     elif llm_provider == "Local Transformers (Hugging Face)":
@@ -236,7 +236,7 @@ with st.sidebar:
         )
 
     st.divider()
-    st.markdown("### ⚙️ Hardware & Cleanup")
+    st.markdown("Hardware & Cleanup")
     device_label = st.selectbox("Run on", list(asr.DEVICE_CHOICES))
     device_choice = asr.DEVICE_CHOICES[device_label]
     gpu = asr.gpu_info()
@@ -257,11 +257,11 @@ with st.sidebar:
 
 tab_transcribe, tab_compare, tab_lists, tab_enroll, tab_profiles = st.tabs(
     [
-        "🎙️ Transcribe & Analyze",
-        "⚖️ Compare & Cross-check",
-        "📖 Word Lists & Spelling",
-        "👥 Enroll Speaker",
-        "🗂️ Saved Profiles",
+        "Transcribe & Analyze",
+        "Compare & Cross-check",
+        "Word Lists & Spelling",
+        "Enroll Speaker",
+        "Saved Profiles",
     ]
 )
 
@@ -335,7 +335,7 @@ with tab_transcribe:
 
             progress_container = st.container()
             with progress_container:
-                st.markdown("#### ⏳ Processing Pipeline")
+                st.markdown("Processing Pipeline")
                 pipeline_status = st.empty()
                 progress_bar = st.progress(0.0)
                 active_card = st.empty()
@@ -363,7 +363,7 @@ with tab_transcribe:
                             )
                         )
                         if turns:
-                            pipeline_status.info("👤 Matching speakers against enrolled profiles...")
+                            pipeline_status.info("Matching speakers against enrolled profiles...")
                             mapping = speakers.label_speakers(
                                 job["audio"], turns, speakers.load_embeddings(),
                                 threshold=speaker_threshold, token=hf_token, device=device_choice,
@@ -379,7 +379,7 @@ with tab_transcribe:
                         job["seg_speakers"] = [("Anonymous 1", 1.0, False)] * len(job["bounds"])
 
                 # ── Stage 2: Load ASR model ─────────────────────────────────────
-                pipeline_status.info(f"🤖 Initializing speech model: {model_label.split(' (')[0]}...")
+                pipeline_status.info(f"Initializing speech model: {model_label.split(' (')[0]}...")
                 engine = asr.get_engine(model_label, dtype_name, device_choice)
                 job["ran_on"] = str(engine.device)
                 model_script = asr.ENGINES[model_label]["script"]
@@ -453,11 +453,11 @@ with tab_transcribe:
                     live_text_stream.caption(f"…{preview_text[-400:]}")
 
                 job["audio"] = None  # free memory once complete
-                pipeline_status.success(f"✅ Transcribed all {total_chunks} segments successfully!")
+                pipeline_status.success(f"Transcribed all {total_chunks} segments successfully!")
 
                 # ── Stage 4: AI Summary ─────────────────────────────────────────
                 if enable_summary and not job.get("summary"):
-                    pipeline_status.info("🧠 Generating AI executive summary & key points...")
+                    pipeline_status.info("Generating AI executive summary & key points...")
                     try:
                         job["summary"] = summary.generate_summary(
                             job["segments"],
@@ -466,7 +466,7 @@ with tab_transcribe:
                             api_key=llm_api_key,
                             device=device_choice,
                         )
-                        pipeline_status.success("✅ Transcription and AI analysis completed!")
+                        pipeline_status.success("Transcription and AI analysis completed!")
                     except Exception as sum_exc:
                         st.warning(f"ASR succeeded, but AI summary generation encountered an issue: {sum_exc}")
 
@@ -494,7 +494,7 @@ with tab_transcribe:
 
             st.write("")
             res_tab_chat, res_tab_text, res_tab_summary, res_tab_stats = st.tabs(
-                ["💬 Dialogue View", "📝 Full Transcript & Export", "🧠 AI Summary & Key Points", "📊 Speaker Distribution"]
+                ["Dialogue View", "Full Transcript & Export", "AI Summary & Key Points", "Speaker Distribution"]
             )
 
             with res_tab_chat:
@@ -555,7 +555,7 @@ with tab_transcribe:
                 c_d1, c_d2, c_d3 = st.columns(3)
                 with c_d1:
                     st.download_button(
-                        "📥 Download Transcript (.txt)",
+                        "Download Transcript (.txt)",
                         edited_transcript.rstrip() + "\n",
                         file_name=f"{file_name.rsplit('.', 1)[0]}_transcript.txt",
                         mime="text/plain",
@@ -573,7 +573,7 @@ with tab_transcribe:
                         ensure_ascii=False,
                     )
                     st.download_button(
-                        "📥 Download Structured (.json)",
+                        "Download Structured (.json)",
                         json_data,
                         file_name=f"{file_name.rsplit('.', 1)[0]}_data.json",
                         mime="application/json",
@@ -581,7 +581,7 @@ with tab_transcribe:
                     )
                 with c_d3:
                     st.download_button(
-                        "📥 Download Raw ASR Output",
+                        "Download Raw ASR Output",
                         raw_full + "\n",
                         file_name=f"{file_name.rsplit('.', 1)[0]}_raw.txt",
                         mime="text/plain",
@@ -598,13 +598,13 @@ with tab_transcribe:
                     c_sum_down, c_sum_regen = st.columns([1, 1])
                     with c_sum_down:
                         st.download_button(
-                            "📥 Download Summary (.md)",
+                            "Download Summary (.md)",
                             current_summary + "\n",
                             file_name=f"{file_name.rsplit('.', 1)[0]}_summary.md",
                             mime="text/markdown",
                         )
                     with c_sum_regen:
-                        if st.button("🔄 Regenerate Summary with current LLM"):
+                        if st.button("Regenerate Summary with current LLM"):
                             with st.spinner("Analyzing transcript and generating updated summary..."):
                                 try:
                                     job["summary"] = summary.generate_summary(
@@ -857,7 +857,7 @@ with tab_profiles:
                     st.markdown(f"### 👤 {name}")
                     st.caption(f"Enrolled: {created_at} · ID: `{speaker_id}`")
                     if name in legacy_names:
-                        st.caption("⚠️ May be an old SpeechBrain profile — re-enroll to use it with pyannote.")
+                        st.caption("May be an old SpeechBrain profile — re-enroll to use it with pyannote.")
                 with right:
                     confirm = st.checkbox("Confirm delete", key=f"confirm_{speaker_id}")
                     if st.button("Delete Profile", key=f"delete_{speaker_id}", disabled=not confirm):
