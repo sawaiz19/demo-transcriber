@@ -19,7 +19,8 @@ MAX_NEW_TOKENS = 600  # one <=30 s chunk never needs more
 SILENCE_RMS = 0.003  # quieter chunks are skipped (avoids hallucinated text)
 
 LANGUAGES = {
-    "Hindi (recommended for Urdu speech)": "Hindi",
+    "Urdu (Native / Pakistani Urdu)": "Urdu",
+    "Hindi (recommended for Qwen / Tara)": "Hindi",
     "Auto-detect": None,
     "English": "English",
 }
@@ -102,8 +103,10 @@ class QwenEngine:
         )
 
     def transcribe(self, chunk, language):
+        # Qwen prefers "Hindi" as proxy for Hindustani/Urdu phonetics
+        lang = "Hindi" if language in ("Urdu", "Hindi", "Hindi (recommended for Qwen / Tara)") else language
         with _wav_file(chunk) as path, torch.inference_mode():
-            results = self.model.transcribe(audio=path, language=language)
+            results = self.model.transcribe(audio=path, language=lang)
         return str(results[0].text).strip() if results else ""
 
 
@@ -125,13 +128,75 @@ class WhisperTinyHinglishEngine:
         )
 
     def transcribe(self, chunk, language):
-        return self.pipe({"raw": chunk, "sampling_rate": SR})["text"].strip()
+        with torch.inference_mode():
+            res = self.pipe({"raw": chunk, "sampling_rate": SR})
+        return res["text"].strip()
 
 
-class TaraEngine:
-    """Trelis/tara: Whisper large-v3 fine-tune. Hindi in Devanagari, English in Latin."""
+class WhisperPipelineEngine:
+    """Standard Hugging Face ASR pipeline for Whisper models (Large-v3-turbo, fine-tuned Urdu, Roman Urdu).
+    Fast, highly reliable, and supports GPU/CPU with float16/bfloat16.
+    """
 
-    def __init__(self, repo, dtype_name, device):
+    def __init__(self, repo, dtype_name, device, forced_language="ur"):
+        from transformers import pipeline
+
+        self.device = device
+        self.repo = repo
+        self.forced_language = forced_language
+        on_gpu = device.startswith("cuda")
+        if not on_gpu:
+            torch.set_num_threads(os.cpu_count() or 4)
+
+        torch_dtype = (
+            getattr(torch, dtype_name)
+            if dtype_name and hasattr(torch, dtype_name)
+            else (torch.float16 if on_gpu else torch.float32)
+        )
+        device_arg = 0 if on_gpu else -1
+
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=repo,
+            device=device_arg,
+            torch_dtype=torch_dtype,
+        )
+
+    def transcribe(self, chunk, language):
+        generate_kwargs = {"task": "transcribe"}
+        if self.forced_language:
+            if language == "English":
+                generate_kwargs["language"] = "en"
+            elif language in ("Urdu", "Urdu (Native / Pakistani Urdu)", "Hindi (recommended for Qwen / Tara)", "Auto-detect", None):
+                generate_kwargs["language"] = self.forced_language
+            else:
+                generate_kwargs["language"] = language
+
+        with torch.inference_mode():
+            res = self.pipe({"raw": chunk, "sampling_rate": SR}, generate_kwargs=generate_kwargs)
+        if isinstance(res, dict):
+            return str(res.get("text", "")).strip()
+        return str(res).strip()
+
+
+def _token_id(tk, name):
+    idx = tk.convert_tokens_to_ids(name)
+    if idx is None or idx == getattr(tk, "unk_token_id", None):
+        raise RuntimeError(f"This model's tokenizer has no token {name}.")
+    return idx
+
+
+def _tara_prefix(tk, language):
+    sot, tr, nots = (_token_id(tk, t) for t in ("<|startoftranscript|>", "<|transcribe|>", "<|notimestamps|>"))
+    if language == "English":
+        return [sot, _token_id(tk, "<|en|>"), tr, nots]
+    return [sot, _token_id(tk, "<|hi|>"), _token_id(tk, "<|mixedcode|>"), tr, nots]
+
+
+class WhisperPrefixEngine:
+    """Whisper-style model decoded greedily with an explicit decoder prefix, used by Tara."""
+
+    def __init__(self, repo, dtype_name, device, prefix_fn):
         from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
         self.device = device
@@ -145,25 +210,18 @@ class TaraEngine:
             .to(device)
             .eval()
         )
-        ids = self.processor.tokenizer.convert_tokens_to_ids
-        self.hi, self.en, self.mc = ids("<|hi|>"), ids("<|en|>"), ids("<|mixedcode|>")
-        self.transcribe_tok, self.no_ts = ids("<|transcribe|>"), ids("<|notimestamps|>")
-        self.sot = ids("<|startoftranscript|>")
+        self.tk = self.processor.tokenizer
+        self.prefix_fn = prefix_fn
+        self.prefix_fn(self.tk, "Hindi")
 
     def transcribe(self, chunk, language):
-        # Prompt tokens (language, mixed-code mode, task) go straight to the decoder and the
-        # text is decoded greedily; this avoids the removed `forced_decoder_ids` argument.
         feats = self.processor(chunk, sampling_rate=SR, return_tensors="pt").input_features
         feats = feats.to(self.device, self.model.dtype)
-        if language == "English":
-            prompt = [self.sot, self.en, self.transcribe_tok, self.no_ts]
-        else:  # Hindi + mixed-code mode: the model card's safe default for Hinglish
-            prompt = [self.sot, self.hi, self.mc, self.transcribe_tok, self.no_ts]
-        ids = torch.tensor([prompt], device=self.device)
-        eos = self.processor.tokenizer.eos_token_id
+        ids = torch.tensor([self.prefix_fn(self.tk, language)], device=self.device)
+        eos = self.tk.eos_token_id
         tokens, past = [], None
         with torch.inference_mode():
-            enc = self.model.model.encoder(feats)  # run the audio encoder once
+            enc = self.model.model.encoder(feats)
             for _ in range(444):
                 out = self.model(
                     encoder_outputs=enc, decoder_input_ids=ids,
@@ -171,15 +229,17 @@ class TaraEngine:
                 )
                 past = out.past_key_values
                 logits = out.logits[:, -1].float()
-                logits[:, eos + 1:] = float("-inf")  # no special / language / timestamp tokens
+                logits[:, eos + 1:] = float("-inf")
+                if not tokens:
+                    logits[:, eos] = float("-inf")
                 nxt = int(logits.argmax(-1))
                 if nxt == eos:
                     break
                 tokens.append(nxt)
-                if len(tokens) >= 20 and len(set(tokens[-20:])) == 1:  # stuck repeating
+                if len(tokens) >= 20 and len(set(tokens[-20:])) == 1:
                     break
                 ids = torch.tensor([[nxt]], device=self.device)
-        return self.processor.tokenizer.decode(tokens, skip_special_tokens=True).strip()
+        return self.tk.decode(tokens, skip_special_tokens=True).strip()
 
 
 class ShrutiEngine:
@@ -200,7 +260,7 @@ class ShrutiEngine:
         self.model = Whistle(hf_hub_download("udgamlabs/Shruti", "shruti.cact"))
 
     def transcribe(self, chunk, language):
-        kwargs = {"language": "en"} if language == "English" else {}  # else auto-detect
+        kwargs = {"language": "en"} if language == "English" else {}
         with _wav_file(chunk) as path:
             result = self.model.transcribe(path, **kwargs)
         text = result.get("text", "") if isinstance(result, dict) else result
@@ -208,36 +268,50 @@ class ShrutiEngine:
 
 
 # ---------------------------- registry / loading -----------------------------
-# script: "devanagari" -> needs the LIPI step; "roman" -> already Roman Hindi.
-# uses_gpu: False means the engine has its own runtime and ignores the 'Run on' setting.
+# script:
+#   "urdu": native Urdu script (automatically converted to Roman Urdu)
+#   "devanagari": Hindi Devanagari script (converted via LIPI)
+#   "roman": model outputs Roman letters directly
 
 ENGINES = {
-    "Qwen3-ASR 1.7B (most accurate)": dict(
+    "Urdu Whisper Large-v3 Turbo (Recommended - Highest Accuracy)": dict(
+        script="urdu", uses_dtype=True, uses_gpu=True,
+        note="Top-tier OpenAI Whisper Turbo model. Outstanding accuracy on Urdu and mixed English. Automatically converted to natural Roman Urdu.",
+        factory=lambda dtype, dev: WhisperPipelineEngine("openai/whisper-large-v3-turbo", dtype, dev, forced_language="ur"),
+    ),
+    "Urdu Whisper Large-v3 (kingabzpro - Fine-tuned Pakistani Urdu)": dict(
+        script="urdu", uses_dtype=True, uses_gpu=True,
+        note="Whisper Large-v3 fine-tuned specifically on Pakistani Urdu datasets (Common Voice & FLEURS). Highest specialized Urdu accuracy.",
+        factory=lambda dtype, dev: WhisperPipelineEngine("kingabzpro/whisper-large-v3-urdu", dtype, dev, forced_language="ur"),
+    ),
+    "Roman Urdu Whisper Turbo (Farhan-SE - Direct Roman)": dict(
+        script="roman", uses_dtype=True, uses_gpu=True,
+        note="Whisper Large-v3 Turbo fine-tuned to transcribe directly into Roman Urdu script.",
+        factory=lambda dtype, dev: WhisperPipelineEngine("Farhan-SE/whisper-large-v3-turbo-roman-urdu-model", dtype, dev, forced_language=None),
+    ),
+    "Qwen3-ASR 1.7B (Hindi / Urdu via Devanagari)": dict(
         script="devanagari", uses_dtype=True, uses_gpu=True,
         note="Best accuracy of the Qwen pair. Needs roughly 4-5 GB of VRAM on a GPU.",
         factory=lambda dtype, dev: QwenEngine("Qwen/Qwen3-ASR-1.7B", dtype, dev),
     ),
-    "Qwen3-ASR 0.6B (faster)": dict(
+    "Qwen3-ASR 0.6B (Faster)": dict(
         script="devanagari", uses_dtype=True, uses_gpu=True,
         note="Roughly 2-3x faster than 1.7B and needs about 2 GB of VRAM, with lower accuracy.",
         factory=lambda dtype, dev: QwenEngine("Qwen/Qwen3-ASR-0.6B", dtype, dev),
     ),
-    "Whisper-tiny Hinglish (lightest, writes Roman directly)": dict(
+    "Whisper-tiny Hinglish (Lightest, writes Roman directly)": dict(
         script="roman", uses_dtype=False, uses_gpu=True,
-        note="39M parameters. Outputs Roman text directly, so no conversion step. "
-        "Less accurate on noisy or fast speech.",
+        note="39M parameters. Outputs Roman text directly, so no conversion step. Less accurate on noisy speech.",
         factory=lambda dtype, dev: WhisperTinyHinglishEngine("abhishekgautamm/whisper-tiny-hinglish", dev),
     ),
     "Tara (Whisper large-v3 based, heavy)": dict(
         script="devanagari", uses_dtype=True, uses_gpu=True,
-        note="1.55B parameters (about 3 GB of VRAM in 16-bit). Strong Hindi/Hinglish benchmarks. "
-        "Needs a GPU to be practical.",
-        factory=lambda dtype, dev: TaraEngine("Trelis/tara", dtype, dev),
+        note="1.55B parameters. Strong Hindi/Hinglish benchmarks. Needs a GPU to be practical.",
+        factory=lambda dtype, dev: WhisperPrefixEngine("Trelis/tara", dtype, dev, _tara_prefix),
     ),
-    "Shruti (tiny 30 MB, offline)": dict(
+    "Shruti (Tiny 30 MB, offline CPU)": dict(
         script="devanagari", uses_dtype=False, uses_gpu=False,
-        note="Runs on its own CPU runtime (not PyTorch), so it does not use the GPU. "
-        "Hindi in Devanagari, English words in Latin. Smallest; less accurate on pure Hindi.",
+        note="Runs on its own CPU runtime. Hindi in Devanagari, English words in Latin.",
         factory=lambda dtype, dev: ShrutiEngine(),
     ),
 }
@@ -258,7 +332,7 @@ def get_engine(label, dtype_name, device_choice="auto"):
     dtype = resolve_dtype(dtype_name, device) if cfg["uses_dtype"] else None
     key = (label, dtype, device)
     if _current["key"] != key:
-        unload_engine()  # free the previous model (and its VRAM) before loading the next
+        unload_engine()
         try:
             _current["engine"] = cfg["factory"](dtype, device)
         except torch.cuda.OutOfMemoryError as exc:

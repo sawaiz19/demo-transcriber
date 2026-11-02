@@ -1,5 +1,7 @@
 streamlit>=1.40
 qwen-asr
+transformers>=4.40.0
+accelerate>=0.28.0
 torch
 numpy
 soundfile

@@ -1,82 +1,62 @@
-# Urdu + English Qwen Transcriber
+# 🎙️ Urdu & English AI Transcriber & Meeting Analyst
 
-A local Streamlit prototype that uses a two-stage workflow:
+An end-to-end local speech recognition and intelligence application built with **Streamlit**, featuring:
 
-1. **Qwen3-ASR** produces the raw speech transcript, with Hindi selected by default as a workaround for Urdu-like speech.
-2. **Ollama + a local text LLM** converts the Hindi/Devanagari transcript into Urdu script. The app offers Mixed Urdu-English and Natural Urdu styles.
-3. Existing speaker-profile enrollment and similarity matching are retained as an optional feature.
+1. **State-of-the-Art Urdu & English ASR**:
+   - **Urdu Whisper Large-v3 Turbo (Recommended)**: OpenAI's highest-accuracy, fastest multilingual Whisper model with native Urdu support.
+   - **Urdu Whisper Large-v3 (kingabzpro)**: Fine-tuned specifically on Pakistani Urdu corpora (Mozilla Common Voice & FLEURS).
+   - **Roman Urdu Whisper Turbo (Farhan-SE)**: Specialized model for direct Roman Urdu transcription.
+   - **Qwen3-ASR (1.7B & 0.6B)**, **Whisper-tiny Hinglish**, and **Tara**.
 
-> Important: Qwen3-ASR's published language list includes Hindi but does not list Urdu. This workaround is experimental; test it on your own Pakistani Urdu accents and code-switching examples. The converter cannot recover words Qwen failed to recognize.
+2. **Automatic Continuous Speaker Identification**:
+   - Integrated directly into the main transcription workflow.
+   - Compares voice embeddings against enrolled profiles using **SpeechBrain ECAPA-TDNN**.
+   - If a speaker is enrolled, uses their real name (e.g., `Sawaiz Ahmad`).
+   - If un-enrolled, dynamically clusters voice signatures into `Anonymous 1`, `Anonymous 2`, etc.
+   - Standalone "Recognize speaker" page has been replaced by seamless automatic speaker tracking in the main transcript.
 
-## Recommended setup on Windows
+3. **Natural Roman Urdu Transliteration**:
+   - High-coverage conversational Urdu dictionary + phonetic ligature transliterator.
+   - Automatically converts native Urdu script or Hindi Devanagari into natural, standardized Roman Urdu.
+   - Editable Roman spelling standard and custom vocabulary/word lists.
 
-**Use Python 3.12** in a fresh environment. The user's previous Python 3.15 setup may not be supported by all model dependencies yet.
+4. **AI Executive Summary & Key Points Generation**:
+   - Built-in LLM integration generating:
+     - 📌 **Executive Summary**
+     - 🎯 **Key Points & Discussion Topics**
+     - 👥 **Speaker-by-Speaker Contributions**
+     - ⚡ **Action Items & Next Steps**
+   - Supports **Ollama** (e.g. `qwen2.5:7b`, `llama3.2:3b`, `qwen3:1.7b`), in-process **Local Hugging Face Transformers** (`Qwen/Qwen2.5-1.5B-Instruct`), and **Cloud APIs** (Groq / OpenAI).
 
-1. Install Python 3.12 from the official Python website and make sure the Python launcher or `python` command works.
-2. Open PowerShell in this project folder.
-3. Create and activate a virtual environment:
+5. **Appealing & Intuitive UI**:
+   - Modern conversation view with speaker avatars and timestamp badges.
+   - Clear multi-stage visual pipeline progress indicator.
+   - One-click export for TXT transcripts, structured JSON, and Markdown summaries.
 
-   ```powershell
-   py -3.12 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+---
 
-   If PowerShell blocks activation, use this command in the same terminal session:
+## 🚀 Quick Start
 
-   ```powershell
-   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-   .\.venv\Scripts\Activate.ps1
-   ```
-
-4. Install [Ollama](https://ollama.com/download) and open it.
-5. In a second PowerShell window, download the lightweight conversion model:
-
-   ```powershell
-   ollama pull qwen3:1.7b
-   ```
-
-6. Return to the project environment and start Streamlit:
-
-   ```powershell
-   streamlit run app.py
-   ```
-
-7. Open the local URL Streamlit prints, usually `http://localhost:8501`.
-
-## Model notes for an 8 GB RAM PC
-
-- The app defaults to `Qwen/Qwen3-ASR-1.7B`, because this is the quality-first model the user tested.
-- If it runs out of memory, choose `Qwen/Qwen3-ASR-0.6B` in the sidebar, close other memory-heavy apps, or use a machine with more RAM.
-- Keep **Unload ASR before conversion** enabled. The app clears the cached ASR model before it asks Ollama to load the text model. This reduces peak RAM use, but Qwen will need to reload on the next recording.
-- The first run downloads model files and can take a while. Later runs are faster if the model stays cached; the unload option trades speed for lower RAM use.
-- Qwen's model package and its dependencies are evolving. If installation fails, check the official Qwen3-ASR README: https://github.com/QwenLM/Qwen3-ASR
-
-## Troubleshooting
-
-### “Could not connect to Ollama”
-Open the Ollama application and verify it is running. Then run:
-
+### 1. Launch with Batch Script
+Double-click `run_app.bat` or run in PowerShell:
 ```powershell
-ollama list
-ollama pull qwen3:1.7b
+.\run_app.bat
 ```
 
-If you changed the model name in the sidebar, pull that exact model first.
+### 2. Manual Launch
+```powershell
+.\.venv\Scripts\Activate.ps1
+streamlit run app.py
+```
 
-### ASR runs out of memory or is extremely slow
-Try `Qwen/Qwen3-ASR-0.6B`, close other applications, and keep the unload option enabled. CPU-only transcription on long recordings can be slow.
+The app opens automatically in your browser at `http://localhost:8501`.
 
-### Speaker profile fails on Windows
-The speaker feature uses SpeechBrain and downloads a separate model. Run the app inside the Python 3.12 virtual environment above. If model file copying fails, check that the project folder is writable and try running from a normal user-owned folder (not `Program Files`). Profiles are stored in `speakers.sqlite3`.
+---
 
-## Files
+## 📋 Features Overview
 
-- `app.py` — Streamlit application.
-- `requirements.txt` — Python dependencies.
-- `.gitignore` — excludes virtual environments, model files, databases and temporary artifacts.
-
-## Privacy
-
-Audio is processed locally by the models in this setup. The first run downloads model weights from their model repositories. Do not enroll or process another person's voice without their consent. If you later configure a cloud model or API, review its privacy terms separately.
+- **🎙️ Transcribe & Analyze**: Upload audio or video files (MP3, WAV, MP4, M4A, WEBM, etc.). Real-time chunking, progress bar, live speech preview, continuous speaker labeling, and AI summarization.
+- **👥 Enroll Speaker**: Record or upload 5–15 seconds of clean speech to create an enrolled profile.
+- **🗂️ Saved Profiles**: View and manage enrolled voice identities in the local SQLite database.
+- **⚖️ Compare & Cross-check**: Evaluate two models or configurations on the same audio clip with word-level disagreement analysis.
+- **📖 Word Lists & Spelling**: Customize find-and-replace terms and standardized Roman spellings.
