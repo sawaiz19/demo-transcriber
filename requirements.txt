@@ -28,5 +28,6 @@ lipi
 requests
 
 # Optional extras (install only if you use them):
-#   demucs            # "Extract voice first (Demucs)" option
-#   cactus-needle     # Shruti (tiny offline CPU) engine
+demucs            # "Extract voice first (Demucs)" option
+cactus-needle     # Shruti (tiny offline CPU) engine
+

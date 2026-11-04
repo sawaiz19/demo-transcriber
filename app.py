@@ -26,7 +26,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ----------------------------- custom modern styling -----------------------------
+# ----------------------------- styling -----------------------------
 st.markdown(
     """
     <style>
@@ -265,9 +265,9 @@ tab_transcribe, tab_compare, tab_lists, tab_enroll, tab_profiles = st.tabs(
     ]
 )
 
-# ============================================================================
+
 # TAB 1: Transcribe & Analyze
-# ============================================================================
+
 
 with tab_transcribe:
     st.markdown('<div class="hero-title">Urdu & English Transcriber & Meeting Analyst</div>', unsafe_allow_html=True)
@@ -659,9 +659,9 @@ with tab_transcribe:
                     )
                 st.dataframe(pd.DataFrame(stats_rows), use_container_width=True)
 
-# ============================================================================
+
 # TAB 2: Compare & Cross-check
-# ============================================================================
+
 
 with tab_compare:
     st.subheader("Compare & Cross-Check ASR Models")
@@ -757,9 +757,9 @@ with tab_compare:
                     with st.container(height=300, border=True):
                         st.markdown(compare.highlight_html(segments, tag.lower()), unsafe_allow_html=True)
 
-# ============================================================================
+
 # TAB 3: Word Lists & Spelling
-# ============================================================================
+
 
 with tab_lists:
     st.subheader("Custom Vocabulary & Word Replacement")
@@ -798,9 +798,9 @@ with tab_lists:
         postprocess.reset_spelling()
         st.rerun()
 
-# ============================================================================
+
 # TAB 4: Enroll Speaker
-# ============================================================================
+
 
 with tab_enroll:
     st.subheader("Create a New Speaker Profile")
@@ -838,9 +838,9 @@ with tab_enroll:
             except Exception as exc:
                 st.error(f"Could not create speaker profile: {exc}")
 
-# ============================================================================
+
 # TAB 5: Saved Profiles
-# ============================================================================
+
 
 with tab_profiles:
     st.subheader("Enrolled Speaker Profiles")
