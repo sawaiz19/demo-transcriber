@@ -10,6 +10,7 @@ import streamlit as st
 
 import asr
 import compare
+import crosscheck
 import pipeline
 import postprocess
 import romanize
@@ -151,6 +152,20 @@ with st.sidebar:
         index=0,
         help="Urdu models prioritize Urdu speech; Qwen/Tara perform best when set to Hindi/Devanagari.",
     )
+
+    st.divider()
+    st.markdown("Cross-check (2nd model)")
+    enable_cross = st.checkbox(
+        "Cross-check with a second model",
+        value=False,
+        help="Runs a second model on the same speaker segments (no second diarization) and highlights disagreements.",
+    )
+    cross_label = None
+    review_threshold = 0.85
+    if enable_cross:
+        cross_label = st.selectbox("Second model (B)", [m for m in asr.ENGINES if m != model_label])
+        st.caption(asr.ENGINES[cross_label]["note"])
+        review_threshold = st.slider("Flag segments below agreement", 0.50, 1.00, 0.85, 0.01)
 
     st.divider()
     st.markdown("Speaker Diarization (pyannote)")
@@ -317,10 +332,17 @@ with tab_transcribe:
                 "duration": 0.0,
                 "summary": None,
                 "ran_on": "",
+                "segments_b": [],
+                "b_label": None,
             }
             st.session_state["job"] = job
 
-        done = job["bounds"] is not None and len(job["segments"]) == len(job["bounds"])
+        b_needed = bool(enable_cross and cross_label)
+        a_done = job["bounds"] is not None and len(job["segments"]) == len(job["bounds"])
+        b_done = (not b_needed) or (
+            a_done and job["b_label"] == cross_label and len(job["segments_b"]) == len(job["bounds"])
+        )
+        done = a_done and b_done
         started = bool(job["segments"])
         btn_label = "Transcribe & Analyze" if not started else ("Re-run Transcription" if done else "Resume Transcription")
 
@@ -331,7 +353,8 @@ with tab_transcribe:
         if run_clicked:
             if done:
                 # the audio was freed after the last run, so decode and diarize again
-                job.update(segments=[], elapsed=0.0, summary=None, bounds=None, seg_speakers=None, audio=None)
+                job.update(segments=[], elapsed=0.0, summary=None, bounds=None, seg_speakers=None, audio=None,
+                           segments_b=[], b_label=None)
 
             progress_container = st.container()
             with progress_container:
@@ -379,9 +402,11 @@ with tab_transcribe:
                         job["seg_speakers"] = [("Anonymous 1", 1.0, False)] * len(job["bounds"])
 
                 # ── Stage 2: Load ASR model ─────────────────────────────────────
-                pipeline_status.info(f"Initializing speech model: {model_label.split(' (')[0]}...")
-                engine = asr.get_engine(model_label, dtype_name, device_choice)
-                job["ran_on"] = str(engine.device)
+                engine = None
+                if len(job["segments"]) < len(job["bounds"]):  # skip loading A when only B is left
+                    pipeline_status.info(f"Initializing speech model: {model_label.split(' (')[0]}...")
+                    engine = asr.get_engine(model_label, dtype_name, device_choice)
+                    job["ran_on"] = str(engine.device)
                 model_script = asr.ENGINES[model_label]["script"]
                 lang = asr.LANGUAGES[language_choice]
 
@@ -452,6 +477,28 @@ with tab_transcribe:
                     preview_text = " ".join(seg["text"] for seg in job["segments"] if seg["text"])
                     live_text_stream.caption(f"…{preview_text[-400:]}")
 
+                # ── Stage 3b: second model on the SAME segments (cross-check) ───
+                if enable_cross and cross_label:
+                    if job["b_label"] != cross_label:
+                        job["segments_b"], job["b_label"] = [], cross_label
+                    if len(job["segments_b"]) < total_chunks:
+                        if job["audio"] is None:
+                            pipeline_status.info("Decoding audio for the second model...")
+                            job["audio"], _ = pipeline.prepare_audio(file_bytes, use_denoise, device_choice)
+                        pipeline_status.info(f"Loading model B: {cross_label.split(' (')[0]}...")
+                        engine_b = asr.get_engine(cross_label, dtype_name, device_choice)
+                        script_b = asr.ENGINES[cross_label]["script"]
+                        while len(job["segments_b"]) < total_chunks:
+                            j = len(job["segments_b"])
+                            s_b, e_b = job["bounds"][j]
+                            pipeline_status.info(f"Model B: segment {j + 1} / {total_chunks}")
+                            raw_b = asr.transcribe_chunk(engine_b, job["audio"][s_b:e_b], lang)
+                            job["segments_b"].append({
+                                "raw_text": raw_b,
+                                "text": pipeline.finalize_text(raw_b, script_b, backend, use_spelling, use_wordlist),
+                            })
+                            progress_bar.progress(len(job["segments_b"]) / total_chunks)
+
                 job["audio"] = None  # free memory once complete
                 pipeline_status.success(f"Transcribed all {total_chunks} segments successfully!")
 
@@ -493,9 +540,12 @@ with tab_transcribe:
             m4.metric("Word Count", f"{total_words:,} words")
 
             st.write("")
-            res_tab_chat, res_tab_text, res_tab_summary, res_tab_stats = st.tabs(
-                ["Dialogue View", "Full Transcript & Export", "AI Summary & Key Points", "Speaker Distribution"]
-            )
+            has_cross = bool(job.get("segments_b")) and len(job["segments_b"]) == len(job["segments"])
+            tab_names = ["Dialogue View", "Full Transcript & Export", "AI Summary & Key Points", "Speaker Distribution"]
+            if has_cross:
+                tab_names.append("Cross-check")
+            _res_tabs = st.tabs(tab_names)
+            res_tab_chat, res_tab_text, res_tab_summary, res_tab_stats = _res_tabs[:4]
 
             with res_tab_chat:
                 st.caption("Speaker turns — consecutive segments from the same speaker are merged into a single turn.")
@@ -658,6 +708,11 @@ with tab_transcribe:
                         }
                     )
                 st.dataframe(pd.DataFrame(stats_rows), use_container_width=True)
+
+            if has_cross:
+                with _res_tabs[4]:
+                    st.subheader("Cross-check: where the two models disagree")
+                    crosscheck.render(job, file_name, model_label, job["b_label"], review_threshold)
 
 
 # TAB 2: Compare & Cross-check
